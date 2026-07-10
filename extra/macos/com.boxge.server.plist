@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Reference launchd template for running Boxge headless on macOS.
+  `scripts/install-service.sh` generates a filled-in copy at
+  ~/Library/LaunchAgents/com.boxge.server.plist with your real paths.
+  Replace __BOXGE_DIR__, __NODE_BIN__, and __NODE_DIR__ if installing by hand.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key><string>com.boxge.server</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>__NODE_BIN__</string>
+        <string>__BOXGE_DIR__/node_modules/.bin/tsx</string>
+        <string>__BOXGE_DIR__/backend/index.ts</string>
+    </array>
+    <key>WorkingDirectory</key><string>__BOXGE_DIR__</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>NODE_ENV</key><string>production</string>
+        <key>BOXGE_PORT</key><string>5001</string>
+        <key>PATH</key><string>__NODE_DIR__:/usr/local/bin:/usr/bin:/bin</string>
+    </dict>
+    <key>RunAtLoad</key><true/>
+    <key>KeepAlive</key><true/>
+    <key>StandardOutPath</key><string>__BOXGE_DIR__/data/boxge.log</string>
+    <key>StandardErrorPath</key><string>__BOXGE_DIR__/data/boxge.err.log</string>
+</dict>
+</plist>

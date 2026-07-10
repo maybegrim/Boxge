@@ -1,0 +1,120 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<svg xmlns="http://www.w3.org/2000/svg"
+     xmlns:xlink="http://www.w3.org/1999/xlink"
+     version="1.1"
+     width="640"
+     height="640"
+     viewBox="0 0 640 640"
+     xml:space="preserve">
+  <desc>Dockge-style two-color original SVG icon inspired by a container control panel. Hand-authored; not an official Apple asset.</desc>
+
+  <defs>
+    <!-- Louis/Dockge-style: one simple two-stop gradient, reused everywhere -->
+    <linearGradient id="SVGID_container_136_0" gradientUnits="userSpaceOnUse"
+                    gradientTransform="matrix(1 0 0 1 -320 -320)"
+                    x1="132" y1="96" x2="510" y2="548">
+      <stop offset="0%" style="stop-color:#AEB5CA;stop-opacity:1"/>
+      <stop offset="100%" style="stop-color:#626A80;stop-opacity:1"/>
+    </linearGradient>
+
+    <linearGradient id="SVGID_container_136_1" gradientUnits="userSpaceOnUse"
+                    gradientTransform="matrix(1 0 0 1 -320 -320)"
+                    x1="148" y1="146" x2="496" y2="430">
+      <stop offset="0%" style="stop-color:#C8CEE0;stop-opacity:1"/>
+      <stop offset="100%" style="stop-color:#7C849B;stop-opacity:1"/>
+    </linearGradient>
+
+    <linearGradient id="SVGID_container_glass_0" gradientUnits="userSpaceOnUse"
+                    x1="-235" y1="-256" x2="225" y2="80">
+      <stop offset="0%" style="stop-color:#FFFFFF;stop-opacity:0.26"/>
+      <stop offset="100%" style="stop-color:#FFFFFF;stop-opacity:0"/>
+    </linearGradient>
+  </defs>
+
+  <g transform="matrix(0.9544918218 0 0 0.9544918218 320 320)" id="containerDockgeTwoColorIcon">
+
+    <!-- Main rounded-square container shell -->
+    <path style="stroke: rgb(242,242,242); stroke-opacity: 0.51; stroke-width: 70; stroke-dasharray: none; stroke-linecap: butt; stroke-dashoffset: 0; stroke-linejoin: miter; stroke-miterlimit: 4; fill: url(#SVGID_container_136_0); fill-rule: nonzero; opacity: 1;"
+          transform="translate(0, 0)"
+          d="M -218 -270
+             C -91 -284 91 -284 218 -270
+             C 256 -266 281 -238 288 -201
+             C 304 -105 304 105 288 201
+             C 281 238 256 266 218 270
+             C 91 284 -91 284 -218 270
+             C -256 266 -281 238 -288 201
+             C -304 105 -304 -105 -288 -201
+             C -281 -238 -256 -266 -218 -270 z"
+          stroke-linecap="round" />
+
+    <!-- Soft glass highlight on shell, neutral only -->
+    <path style="stroke: none; fill: url(#SVGID_container_glass_0); fill-rule: nonzero; opacity: 0.8;"
+          transform="translate(0, 0)"
+          d="M -212 -244
+             C -86 -258 94 -258 211 -244
+             C 242 -240 260 -217 266 -184
+             C 277 -116 277 -61 267 -15
+             C 188 17 79 23 -34 10
+             C -139 -2 -220 -27 -270 -61
+             C -275 -108 -274 -149 -266 -184
+             C -259 -217 -241 -240 -212 -244 z" />
+
+    <!-- Top capsule -->
+    <path style="stroke: rgb(242,242,242); stroke-opacity: 0.58; stroke-width: 16; stroke-dasharray: none; stroke-linecap: butt; stroke-dashoffset: 0; stroke-linejoin: miter; stroke-miterlimit: 4; fill: url(#SVGID_container_136_1); fill-rule: nonzero; opacity: 1;"
+          transform="translate(0, 0)"
+          d="M -196 -150
+             C -196 -176 -174 -198 -148 -198
+             L 148 -198
+             C 174 -198 196 -176 196 -150
+             C 196 -124 174 -102 148 -102
+             L -148 -102
+             C -174 -102 -196 -124 -196 -150 z"
+          stroke-linecap="round" />
+
+    <!-- Middle capsule -->
+    <path style="stroke: rgb(242,242,242); stroke-opacity: 0.52; stroke-width: 16; stroke-dasharray: none; stroke-linecap: butt; stroke-dashoffset: 0; stroke-linejoin: miter; stroke-miterlimit: 4; fill: url(#SVGID_container_136_1); fill-rule: nonzero; opacity: 0.94;"
+          transform="translate(0, 0)"
+          d="M -196 -35
+             C -196 -61 -174 -83 -148 -83
+             L 148 -83
+             C 174 -83 196 -61 196 -35
+             C 196 -9 174 13 148 13
+             L -148 13
+             C -174 13 -196 -9 -196 -35 z"
+          stroke-linecap="round" />
+
+    <!-- Bottom capsule -->
+    <path style="stroke: rgb(242,242,242); stroke-opacity: 0.47; stroke-width: 16; stroke-dasharray: none; stroke-linecap: butt; stroke-dashoffset: 0; stroke-linejoin: miter; stroke-miterlimit: 4; fill: url(#SVGID_container_136_1); fill-rule: nonzero; opacity: 0.88;"
+          transform="translate(0, 0)"
+          d="M -196 80
+             C -196 54 -174 32 -148 32
+             L 148 32
+             C 174 32 196 54 196 80
+             C 196 106 174 128 148 128
+             L -148 128
+             C -174 128 -196 106 -196 80 z"
+          stroke-linecap="round" />
+
+    <!-- Simple neutral inner bevels; no extra color palette -->
+    <path style="stroke: rgb(255,255,255); stroke-opacity: 0.18; stroke-width: 8; stroke-dasharray: none; stroke-linecap: round; stroke-dashoffset: 0; stroke-linejoin: round; stroke-miterlimit: 4; fill: none; opacity: 1;"
+          transform="translate(0, 0)"
+          d="M -158 -183 L 133 -183 C 161 -183 181 -168 183 -149" />
+
+    <path style="stroke: rgb(255,255,255); stroke-opacity: 0.14; stroke-width: 8; stroke-dasharray: none; stroke-linecap: round; stroke-dashoffset: 0; stroke-linejoin: round; stroke-miterlimit: 4; fill: none; opacity: 1;"
+          transform="translate(0, 115)"
+          d="M -158 -183 L 133 -183 C 161 -183 181 -168 183 -149" />
+
+    <path style="stroke: rgb(255,255,255); stroke-opacity: 0.1; stroke-width: 8; stroke-dasharray: none; stroke-linecap: round; stroke-dashoffset: 0; stroke-linejoin: round; stroke-miterlimit: 4; fill: none; opacity: 1;"
+          transform="translate(0, 230)"
+          d="M -158 -183 L 133 -183 C 161 -183 181 -168 183 -149" />
+
+    <!-- Switch dots: neutral, like the source logo but simplified -->
+    <circle style="stroke: rgb(242,242,242); stroke-opacity: 0.55; stroke-width: 10; fill: rgb(248,248,252); fill-rule: nonzero; opacity: 1;"
+            cx="151" cy="-150" r="31" />
+    <circle style="stroke: rgb(242,242,242); stroke-opacity: 0.45; stroke-width: 10; fill: rgb(228,231,242); fill-rule: nonzero; opacity: 0.84;"
+            cx="151" cy="-35" r="31" />
+    <circle style="stroke: rgb(242,242,242); stroke-opacity: 0.38; stroke-width: 10; fill: rgb(216,220,234); fill-rule: nonzero; opacity: 0.74;"
+            cx="151" cy="80" r="31" />
+
+  </g>
+</svg>
