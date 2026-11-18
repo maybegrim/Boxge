@@ -1,9 +1,4 @@
 #!/usr/bin/env bash
-#
-# Install Boxge as a per-user launchd service so it runs headless and restarts on login/crash.
-# Run once from the repo:  ./scripts/install-service.sh
-# Uninstall:               ./scripts/uninstall-service.sh
-#
 set -euo pipefail
 
 BOXGE_DIR="$(cd "$(dirname "$0")/.." && pwd)"
@@ -11,6 +6,7 @@ NODE_BIN="$(command -v node || true)"
 PORT="${BOXGE_PORT:-5001}"
 LABEL="com.boxge.server"
 PLIST="$HOME/Library/LaunchAgents/${LABEL}.plist"
+DOMAIN="gui/$(id -u)"
 
 if [ -z "$NODE_BIN" ]; then
     echo "error: node not found on PATH. Install Node 22+ first." >&2
@@ -23,7 +19,6 @@ if ! command -v container >/dev/null 2>&1; then
     echo "         See https://github.com/apple/container" >&2
 fi
 
-# Make sure deps + a built frontend exist (the production server serves frontend-dist).
 if [ ! -d "$BOXGE_DIR/node_modules" ]; then
     echo "Installing dependencies…"
     ( cd "$BOXGE_DIR" && npm install )
@@ -52,7 +47,7 @@ cat > "$PLIST" <<PLIST
     <dict>
         <key>NODE_ENV</key><string>production</string>
         <key>BOXGE_PORT</key><string>${PORT}</string>
-        <key>PATH</key><string>${NODE_DIR}:/usr/local/bin:/usr/bin:/bin</string>
+        <key>PATH</key><string>${NODE_DIR}:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
     </dict>
     <key>RunAtLoad</key><true/>
     <key>KeepAlive</key><true/>
@@ -62,11 +57,17 @@ cat > "$PLIST" <<PLIST
 </plist>
 PLIST
 
-# (Re)load the service.
-launchctl unload "$PLIST" 2>/dev/null || true
-launchctl load "$PLIST"
+if launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1; then
+    launchctl bootout "$DOMAIN/$LABEL" 2>/dev/null || true
+    for _ in $(seq 1 50); do
+        launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1 || break
+        sleep 0.2
+    done
+fi
+launchctl bootstrap "$DOMAIN" "$PLIST"
 
 echo "✅ Boxge installed as a launchd service (${LABEL})."
-echo "   URL:  http://localhost:${PORT}"
-echo "   Logs: ${BOXGE_DIR}/data/boxge.log"
-echo "   Stop: ./scripts/uninstall-service.sh"
+echo "   URL:      http://localhost:${PORT}"
+echo "   Logs:     ${BOXGE_DIR}/data/boxge.log"
+echo "   Stop:     ./scripts/uninstall-service.sh"
+echo "   Menu bar: ./extra/menubar/build.sh --install"

@@ -1,5 +1,7 @@
 import "dotenv/config";
 import { MainRouter } from "./routers/main-router";
+import { LocalApiRouter } from "./routers/local-api-router";
+import { LocalApi } from "./local-api";
 import * as fs from "node:fs";
 import os from "node:os";
 import { PackageJson } from "type-fest";
@@ -31,7 +33,7 @@ import { Stack } from "./stack";
 import { Cron } from "croner";
 import gracefulShutdown from "http-graceful-shutdown";
 import User from "./models/user";
-import { containerEngine } from "./container";
+import { containerEngine, normalizeDnsDomain, restartSupervisor } from "./container";
 import { sampleHostMetrics } from "./host-metrics";
 import { AgentManager } from "./agent-manager";
 import { AgentProxySocketHandler } from "./socket-handlers/agent-proxy-socket-handler";
@@ -40,7 +42,6 @@ import { AgentSocket } from "../common/agent-socket";
 import { ManageAgentSocketHandler } from "./socket-handlers/manage-agent-socket-handler";
 import { Terminal } from "./terminal";
 
-/** Human-readable bytes (binary units), e.g. 16502784 -> "15.74 MiB". */
 function formatBytes(bytes : number) : string {
     if (!bytes || bytes < 0) {
         return "0 B";
@@ -58,16 +59,13 @@ export class DockgeServer {
     config : Config;
     indexHTML : string = "";
 
-    /**
-     * List of express routers
-     */
     routerList : Router[] = [
+        new LocalApiRouter(),
         new MainRouter(),
     ];
 
-    /**
-     * List of socket handlers (no agent support)
-     */
+    localApi : LocalApi = new LocalApi();
+
     socketHandlerList : SocketHandler[] = [
         new MainSocketHandler(),
         new ManageAgentSocketHandler(),
@@ -75,31 +73,18 @@ export class DockgeServer {
 
     agentProxySocketHandler = new AgentProxySocketHandler();
 
-    /**
-     * List of socket handlers (support agent)
-     */
     agentSocketHandlerList : AgentSocketHandler[] = [
         new DockerSocketHandler(),
         new TerminalSocketHandler(),
     ];
 
-    /**
-     * Show Setup Page
-     */
     needSetup = false;
 
     jwtSecret : string = "";
 
     stacksDir : string = "";
 
-    /** Previous per-container CPU sample (microseconds + wall-clock ms) for computing CPU %. */
-    private prevStats : Map<string, { cpu : number; t : number }> = new Map();
-
-    /**
-     *
-     */
     constructor() {
-        // Catch unexpected errors here
         let unexpectedErrorHandler = (error : unknown) => {
             console.trace(error);
             console.error("If you keep encountering errors, please report a Boxge issue (forked from Dockge, louislam/dockge).");
@@ -111,13 +96,8 @@ export class DockgeServer {
             process.env.NODE_ENV = "production";
         }
 
-        // Log NODE ENV
         log.info("server", "NODE_ENV: " + process.env.NODE_ENV);
 
-        // Default stacks directory.
-        // Boxge runs as a native, user-owned macOS host process (not a container that
-        // bind-mounts /opt/stacks like Dockge), so default to a user-owned dir that needs
-        // no sudo. Override with STACKS_DIR / BOXGE_STACKS_DIR (or --stacks-dir).
         let defaultStacksDir;
         if (process.platform === "win32") {
             defaultStacksDir = "./stacks";
@@ -125,7 +105,6 @@ export class DockgeServer {
             defaultStacksDir = path.join(os.homedir(), ".boxge", "stacks");
         }
 
-        // Define all possible arguments
         let args = parse<Arguments>({
             sslKey: {
                 type: String,
@@ -164,8 +143,6 @@ export class DockgeServer {
 
         this.config = args as Config;
 
-        // Load from environment variables or default values if args are not set.
-        // Prefer BOXGE_* env vars; fall back to legacy DOCKGE_* so existing setups keep working.
         const env = (name : string) => process.env[`BOXGE_${name}`] ?? process.env[`DOCKGE_${name}`];
         this.config.sslKey = args.sslKey || env("SSL_KEY") || undefined;
         this.config.sslCert = args.sslCert || env("SSL_CERT") || undefined;
@@ -184,17 +161,14 @@ export class DockgeServer {
         try {
             this.indexHTML = fs.readFileSync("./frontend-dist/index.html").toString();
         } catch (e) {
-            // "dist/index.html" is not necessary for development
             if (process.env.NODE_ENV !== "development") {
                 log.error("server", "Error: Cannot find 'frontend-dist/index.html', did you install correctly?");
                 process.exit(1);
             }
         }
 
-        // Create express
         this.app = express();
 
-        // Create HTTP server
         if (this.config.sslKey && this.config.sslCert) {
             log.info("server", "Server Type: HTTPS");
             this.httpServer = https.createServer({
@@ -207,22 +181,18 @@ export class DockgeServer {
             this.httpServer = http.createServer(this.app);
         }
 
-        // Binding Routers
         for (const router of this.routerList) {
             this.app.use(router.create(this.app, this));
         }
 
-        // Static files
         this.app.use("/", expressStaticGzip("frontend-dist", {
             enableBrotli: true,
         }));
 
-        // Universal Route Handler, must be at the end of all express routes.
         this.app.get("*", async (_request, response) => {
             response.send(this.indexHTML);
         });
 
-        // Allow all CORS origins in development
         let cors = undefined;
         if (isDev) {
             cors = {
@@ -230,7 +200,6 @@ export class DockgeServer {
             };
         }
 
-        // Create Socket.io
         this.io = new socketIO.Server(this.httpServer, {
             cors,
             allowRequest: (req, callback) => {
@@ -240,10 +209,8 @@ export class DockgeServer {
                 if (!bypass) {
                     let host = req.headers.host;
 
-                    // If this is set, it means the request is from the browser
                     let origin = req.headers.origin;
 
-                    // If this is from the browser, check if the origin is allowed
                     if (origin) {
                         try {
                             let originURL = new URL(origin);
@@ -253,7 +220,6 @@ export class DockgeServer {
                                 log.error("auth", `Origin (${origin}) does not match host (${host}), IP: ${req.socket.remoteAddress}`);
                             }
                         } catch (e) {
-                            // Invalid origin url, probably not from browser
                             isOriginValid = false;
                             log.error("auth", `Invalid origin url (${origin}), IP: ${req.socket.remoteAddress}`);
                         }
@@ -299,25 +265,17 @@ export class DockgeServer {
                 dockgeSocket.emit("setup");
             }
 
-            // Create socket handlers (original, no agent support)
             for (const socketHandler of this.socketHandlerList) {
                 socketHandler.create(dockgeSocket, this);
             }
 
-            // Create Agent Socket
             let agentSocket = new AgentSocket();
 
-            // Create agent socket handlers
             for (const socketHandler of this.agentSocketHandlerList) {
                 socketHandler.create(dockgeSocket, this, agentSocket);
             }
 
-            // Create agent proxy socket handlers
             this.agentProxySocketHandler.create2(dockgeSocket, this, agentSocket);
-
-            // ***************************
-            // Better do anything after added all socket handlers here
-            // ***************************
 
             log.debug("auth", "check auto login");
             if (await Settings.get("disableAuth")) {
@@ -328,7 +286,6 @@ export class DockgeServer {
                 log.debug("auth", "need auth");
             }
 
-            // Socket disconnect
             dockgeSocket.on("disconnect", () => {
                 log.info("server", "Socket disconnected!");
                 dockgeSocket.instanceManager.disconnectAll();
@@ -337,7 +294,6 @@ export class DockgeServer {
         });
 
         this.io.on("disconnect", () => {
-
         });
 
         if (isDev) {
@@ -362,36 +318,38 @@ export class DockgeServer {
 
         socket.instanceManager.sendAgentList();
 
-        // Also connect to other dockge instances
         socket.instanceManager.connectAll();
     }
 
-    /**
-     *
-     */
     async serve() {
-        // Create all the necessary directories
         this.initDataDir();
+        restartSupervisor.setStateFile(path.join(this.config.dataDir, "supervisor-state.json"));
 
-        // Check the Apple `container` runtime instead of Docker. We don't hard-fail if it isn't
-        // running — read-only screens still load and the user can start it — but we log loudly.
+        if (process.env.BOXGE_SKIP_RUNTIME_START !== "1") {
+            try {
+                if (await containerEngine.ensureSystemStarted()) {
+                    log.info("server", "Started the Apple container runtime.");
+                }
+            } catch (e) {
+                log.error("server", "Could not start the Apple container runtime: " + (e instanceof Error ? e.message : String(e)));
+            }
+        }
+
         try {
             const status = await containerEngine.systemStatus();
             if (status.running) {
                 log.info("server", `Apple container runtime ${status.version} is running.`);
             } else {
                 log.warn("server", `Apple container runtime ${status.version} is not running. ` +
-                    "Start it with `container system start` (Boxge can also start it on demand).");
+                    "Start it with `container system start`.");
             }
         } catch (e) {
             log.error("server", "Could not reach the Apple container runtime. Is it installed? " +
                 "See https://github.com/apple/container");
         }
 
-        // Resume restart/health supervision for stacks that are already running.
         await Stack.reconcileSupervisors(this);
 
-        // Connect to database
         try {
             await Database.init(this);
         } catch (e) {
@@ -401,7 +359,6 @@ export class DockgeServer {
             process.exit(1);
         }
 
-        // First time setup if needed
         let jwtSecretBean = await R.findOne("setting", " `key` = ? ", [
             "jwtSecret",
         ]);
@@ -416,31 +373,31 @@ export class DockgeServer {
 
         this.jwtSecret = jwtSecretBean.value;
 
+        await this.reloadServiceDns();
+
         const userCount = (await R.knex("user").count("id as count").first()).count;
 
         log.debug("server", "User count: " + userCount);
 
-        // If there is no record in user table, it is a new Dockge instance, need to setup
         if (userCount == 0) {
             log.info("server", "No user, need setup");
             this.needSetup = true;
         }
 
-        // Listen
         this.httpServer.listen(this.config.port, this.config.hostname, () => {
             if (this.config.hostname) {
                 log.info( "server", `Listening on ${this.config.hostname}:${this.config.port}`);
             } else {
                 log.info("server", `Listening on ${this.config.port}`);
             }
+            void this.localApi.publish(this.getLocalHttpURL(), String(this.packageJSON.version));
 
-            // Run every 10 seconds
             Cron("*/10 * * * * *", {
-                protect: true,  // Enabled over-run protection.
+                protect: true,
             }, () => {
-                //log.debug("server", "Cron job running");
                 this.sendStackList(true);
                 this.sendSystemStatus();
+                void this.localApi.ensurePublished();
             });
 
             checkVersion.startInterval();
@@ -448,21 +405,18 @@ export class DockgeServer {
 
         gracefulShutdown(this.httpServer, {
             signals: "SIGINT SIGTERM",
-            timeout: 30000,                   // timeout: 30 secs
-            development: false,               // not in dev mode
-            forceExit: true,                  // triggers process.exit() at the end of shutdown process
-            onShutdown: this.shutdownFunction,     // shutdown function (async) - e.g. for cleanup DB, ...
-            finally: this.finalFunction,            // finally function (sync) - e.g. for logging
+            timeout: 30000,
+            development: false,
+            forceExit: true,
+            onShutdown: async (signal : string | undefined) => {
+                this.localApi.unpublish();
+                await this.shutdownFunction(signal);
+            },
+            finally: this.finalFunction,
         });
 
     }
 
-    /**
-     * Emits the version information to the client.
-     * @param socket Socket.io socket instance
-     * @param hideVersion Should we hide the version information in the response?
-     * @returns
-     */
     async sendInfo(socket : Socket, hideVersion = false) {
         let versionProperty;
         let latestVersionProperty;
@@ -479,16 +433,9 @@ export class DockgeServer {
             latestVersion: latestVersionProperty,
             isContainer,
             primaryHostname: await Settings.get("primaryHostname") || detectPrimaryHostname(),
-            //serverTimezone: await this.getTimezone(),
-            //serverTimezoneOffset: this.getTimezoneOffset(),
         });
     }
 
-    /**
-     * Get the IP of the client connected to the socket
-     * @param {Socket} socket Socket to query
-     * @returns IP of client
-     */
     async getClientIP(socket : Socket) : Promise<string> {
         let clientIP = socket.client.conn.remoteAddress;
 
@@ -508,14 +455,7 @@ export class DockgeServer {
         return clientIP.replace(/^::ffff:/, "");
     }
 
-    /**
-     * Attempt to get the current server timezone
-     * If this fails, fall back to environment variables and then make a
-     * guess.
-     * @returns {Promise<string>} Current timezone
-     */
     async getTimezone() {
-        // From process.env.TZ
         try {
             if (process.env.TZ) {
                 this.checkTimezone(process.env.TZ);
@@ -529,7 +469,6 @@ export class DockgeServer {
 
         const timezone = await Settings.get("serverTimezone");
 
-        // From Settings
         try {
             log.debug("timezone", "Using timezone from settings: " + timezone);
             if (timezone) {
@@ -542,7 +481,6 @@ export class DockgeServer {
             }
         }
 
-        // Guess
         try {
             const guess = dayjs.tz.guess();
             log.debug("timezone", "Guessing timezone: " + guess);
@@ -553,26 +491,15 @@ export class DockgeServer {
                 return "UTC";
             }
         } catch (e) {
-            // Guess failed, fall back to UTC
             log.debug("timezone", "Guessed an invalid timezone. Use UTC as fallback");
             return "UTC";
         }
     }
 
-    /**
-     * Get the current offset
-     * @returns {string} Time offset
-     */
     getTimezoneOffset() {
         return dayjs().format("Z");
     }
 
-    /**
-     * Throw an error if the timezone is invalid
-     * @param {string} timezone Timezone to test
-     * @returns {void}
-     * @throws The timezone is invalid
-     */
     checkTimezone(timezone : string) {
         try {
             dayjs.utc("2013-11-18 11:55").tz(timezone).format();
@@ -581,20 +508,15 @@ export class DockgeServer {
         }
     }
 
-    /**
-     * Initialize the data directory
-     */
     initDataDir() {
         if (! fs.existsSync(this.config.dataDir)) {
             fs.mkdirSync(this.config.dataDir, { recursive: true });
         }
 
-        // Check if a directory
         if (!fs.lstatSync(this.config.dataDir).isDirectory()) {
             throw new Error(`Fatal error: ${this.config.dataDir} is not a directory`);
         }
 
-        // Create data/stacks directory
         if (!fs.existsSync(this.stacksDir)) {
             fs.mkdirSync(this.stacksDir, { recursive: true });
         }
@@ -602,10 +524,6 @@ export class DockgeServer {
         log.info("server", `Data Dir: ${this.config.dataDir}`);
     }
 
-    /**
-     * Init or reset JWT secret
-     * @returns  JWT secret
-     */
     async initJWTSecret() : Promise<Bean> {
         let jwtSecretBean = await R.findOne("setting", " `key` = ? ", [
             "jwtSecret",
@@ -621,10 +539,6 @@ export class DockgeServer {
         return jwtSecretBean;
     }
 
-    /**
-     * Send stack list to all connected sockets
-     * @param useCache
-     */
     async sendStackList(useCache = false) {
         let socketList = this.io.sockets.sockets.values();
 
@@ -633,10 +547,8 @@ export class DockgeServer {
         for (let socket of socketList) {
             let dockgeSocket = socket as DockgeSocket;
 
-            // Check if the room is a number (user id)
             if (dockgeSocket.userID) {
 
-                // Get the list only if there is a logged in user
                 if (!stackList) {
                     stackList = await Stack.getStackList(this, useCache);
                 }
@@ -656,11 +568,27 @@ export class DockgeServer {
         }
     }
 
+    async reloadServiceDns() {
+        try {
+            Stack.serviceDnsDomain = normalizeDnsDomain(await Settings.get("serviceDnsDomain"));
+        } catch (e) {
+            Stack.serviceDnsDomain = "";
+            log.warn("server", "Ignoring the service DNS domain setting: " + (e instanceof Error ? e.message : String(e)));
+        }
+    }
+
     async sendSystemStatus(socket? : DockgeSocket) {
         const status = await containerEngine.systemStatus();
+        const serviceDnsDomain = Stack.serviceDnsDomain;
         const payload = {
+            serviceDnsDomain,
+            serviceDnsRegistered: serviceDnsDomain !== "" && status.running
+                ? await containerEngine.isDnsDomainRegistered(serviceDnsDomain)
+                : false,
             runtimeRunning: status.running,
             runtimeVersion: status.version,
+            runtimeSupported: status.supported,
+            runtimeMinVersion: status.minVersion,
             host: sampleHostMetrics(),
         };
 
@@ -693,29 +621,15 @@ export class DockgeServer {
 
         try {
             const snapshots = await containerEngine.allStats();
-            const now = Date.now();
-            const nextPrev = new Map<string, { cpu : number; t : number }>();
-
             for (const s of snapshots) {
                 const memPerc = s.memoryLimitBytes > 0
                     ? ((s.memoryUsageBytes / s.memoryLimitBytes) * 100).toFixed(2) + "%"
                     : "-";
 
-                // CPU % from two samples: container CPU microseconds over wall-clock microseconds.
-                // Can exceed 100% on multi-core, matching Docker's display.
-                let cpuPerc = "-";
-                const prev = this.prevStats.get(s.containerName);
-                if (prev && now > prev.t) {
-                    const deltaCpu = s.cpuUsageUsec - prev.cpu;
-                    const deltaWallUsec = (now - prev.t) * 1000;
-                    if (deltaCpu >= 0 && deltaWallUsec > 0) {
-                        cpuPerc = ((deltaCpu / deltaWallUsec) * 100).toFixed(2) + "%";
-                    }
-                }
-                nextPrev.set(s.containerName, { cpu: s.cpuUsageUsec,
-                    t: now });
+                const cpuPerc = typeof s.cpuUtilization === "number"
+                    ? (s.cpuUtilization * 100).toFixed(2) + "%"
+                    : "-";
 
-                // Keep the field names Dockge's UI expects (CPUPerc / MemUsage / MemPerc).
                 stats.set(s.containerName, {
                     Name: s.containerName,
                     CPUPerc: cpuPerc,
@@ -723,7 +637,6 @@ export class DockgeServer {
                     MemPerc: memPerc,
                 });
             }
-            this.prevStats = nextPrev;
             return stats;
         } catch (e) {
             log.error("getDockerStats", e);
@@ -735,34 +648,18 @@ export class DockgeServer {
         return path.resolve(this.stacksDir);
     }
 
-    /**
-     * Shutdown the application
-     * Stops all monitors and closes the database connection.
-     * @param signal The signal that triggered this function to be called.
-     */
     async shutdownFunction(signal : string | undefined) {
         log.info("server", "Shutdown requested");
         log.info("server", "Called signal: " + signal);
-
-        // TODO: Close all terminals?
 
         await Database.close();
         Settings.stopCacheCleaner();
     }
 
-    /**
-     * Final function called before application exits
-     */
     finalFunction() {
         log.info("server", "Graceful shutdown successful!");
     }
 
-    /**
-     * Force connected sockets of a user to refresh and disconnect.
-     * Used for resetting password.
-     * @param {string} userID
-     * @param {string?} currentSocketID
-     */
     disconnectAllSocketClients(userID: number | undefined, currentSocketID? : string) {
         for (const rawSocket of this.io.sockets.sockets.values()) {
             let socket = rawSocket as DockgeSocket;
@@ -771,7 +668,6 @@ export class DockgeServer {
                     socket.emit("refresh");
                     socket.disconnect();
                 } catch (e) {
-
                 }
             }
         }
@@ -779,6 +675,13 @@ export class DockgeServer {
 
     isSSL() {
         return this.config.sslKey && this.config.sslCert;
+    }
+
+    getLocalHttpURL() {
+        const protocol = this.isSSL() ? "https" : "http";
+        const bound = this.config.hostname;
+        const host = !bound || bound === "0.0.0.0" || bound === "::" ? "127.0.0.1" : bound;
+        return `${protocol}://${host}:${this.config.port}`;
     }
 
     getLocalWebSocketURL() {

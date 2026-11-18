@@ -4,6 +4,9 @@
             <span class="dot"></span>
             {{ runtimeRunning ? $t("runtimeUp") : $t("runtimeDown") }}
         </span>
+        <span v-if="runtimeOutdated" class="badge bg-warning text-dark me-2" :title="$t('runtimeOutdatedMsg', [ systemStatus.runtimeVersion, systemStatus.runtimeMinVersion ])">
+            {{ $t("runtimeOutdated") }}
+        </span>
         <span class="badge bg-secondary me-2" :title="$t('activeStacks')">{{ activeCount }} {{ $t("active") }}</span>
         <span v-if="host" class="metric me-2" :title="$t('hostCpu')">CPU {{ host.cpuPercent }}%</span>
         <span v-if="host" class="metric" :title="$t('hostMem')">{{ memText }}</span>
@@ -21,6 +24,9 @@ export default defineComponent({
         },
         runtimeRunning() {
             return !!this.systemStatus.runtimeRunning;
+        },
+        runtimeOutdated() {
+            return this.systemStatus.runtimeSupported === false && !!this.systemStatus.runtimeVersion;
         },
         host() {
             return this.systemStatus.host || null;

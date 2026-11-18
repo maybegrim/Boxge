@@ -1,5 +1,11 @@
 # Phase 0 Spike — Empirical findings on `apple/container`
 
+> **Note, November 2026.** This is the original record from `container` 1.0.0 and it is kept as
+> written. Two things in it no longer hold. Finding 1 was wrong: a published port does forward to
+> the host, and binds on all interfaces unless a host IP is given. And Boxge now requires
+> `container` 1.7.1, where service names can resolve through DNS aliases once a domain is
+> registered with `sudo container system dns create`. The README describes the current behaviour.
+
 Recorded against a real macOS 26.5.1 (build 25F80), Apple silicon (arm64) host.
 
 ```

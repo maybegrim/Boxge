@@ -1,11 +1,17 @@
+export interface RawSystemComponent {
+    version: string;
+    build: string;
+    commit: string;
+    appName: string;
+}
+
 export interface RawSystemStatus {
     status: string;
-    apiServerAppName: string;
-    apiServerBuild: string;
-    apiServerCommit: string;
-    apiServerVersion: string;
-    appRoot: string;
-    installRoot: string;
+    client?: RawSystemComponent;
+    server?: RawSystemComponent;
+    host?: { architecture: string; operatingSystem: string; cpus: number };
+    paths?: { appRoot: string; installRoot: string; logRoot?: string };
+    resources?: { containersTotal: number; containersRunning: number; images?: number };
 }
 
 export interface RawContainerNetworkStatus {
@@ -30,6 +36,7 @@ export interface RawContainer {
     id: string;
     configuration: {
         labels: Record<string, string>;
+        creationDate?: string;
         image: { reference: string; descriptor?: { digest?: string } };
         networks: { network: string; options?: Record<string, unknown> }[];
         publishedPorts: RawPublishedPort[];
@@ -95,6 +102,7 @@ export interface RawStats {
     blockWriteBytes: number;
     networkRxBytes: number;
     networkTxBytes: number;
+    cpuUtilization?: number;
 }
 
 export interface ServiceStatus {
@@ -133,7 +141,7 @@ export interface StatsSnapshot {
     containerName: string;
     service?: string;
     numProcesses: number;
-    cpuUsageUsec: number;
+    cpuUtilization?: number;
     memoryUsageBytes: number;
     memoryLimitBytes: number;
     networkRxBytes: number;
@@ -143,6 +151,8 @@ export interface StatsSnapshot {
 export interface SystemStatus {
     running: boolean;
     version: string;
+    supported: boolean;
+    minVersion: string;
     raw?: RawSystemStatus;
 }
 
@@ -156,22 +166,65 @@ export interface TerminalSession {
     close(): void;
 }
 
+export type RestartPolicy = "no" | "always" | "on-failure" | "unless-stopped";
+
+export interface ParsedPort {
+    hostIp?: string;
+    hostPort: string;
+    containerPort: string;
+    proto: string;
+}
+
+export interface ParsedVolume {
+    type: "named" | "bind" | "anonymous";
+    source?: string;
+    target: string;
+    readonly?: boolean;
+    external?: boolean;
+}
+
+export interface ParsedNetwork {
+    key: string;
+    name: string;
+    external: boolean;
+    internal: boolean;
+}
+
+export interface ParsedSecret {
+    name: string;
+    file?: string;
+    value?: string;
+}
+
+export interface ParsedEnvFile {
+    path: string;
+    required: boolean;
+}
+
+export type PullPolicy = "always" | "missing" | "never" | "build";
+
 export interface ParsedService {
     name: string;
     image?: string;
-    build?: { context: string; dockerfile?: string };
+    build?: { context: string; dockerfile?: string; args?: Record<string, string>; target?: string };
     command?: string[];
     entrypoint?: string[];
     environment?: Record<string, string>;
-    envFiles?: string[];
-    ports?: { hostPort?: number; containerPort: number; proto: string }[];
-    volumes?: { type: "named" | "bind" | "anonymous"; source?: string; target: string; readonly?: boolean }[];
+    envFiles?: ParsedEnvFile[];
+    networks: string[];
+    secrets?: ParsedSecret[];
+    pullPolicy?: PullPolicy;
+    stopGracePeriod?: number;
+    stopSignal?: string;
+    ports?: ParsedPort[];
+    volumes?: ParsedVolume[];
     workingDir?: string;
     user?: string;
     labels?: Record<string, string>;
     cpus?: number;
     memLimit?: string;
-    restart?: "no" | "always" | "on-failure" | "unless-stopped";
+    restart?: RestartPolicy;
+    restartMaxRetries?: number;
     capAdd?: string[];
     capDrop?: string[];
     readOnly?: boolean;
@@ -179,6 +232,12 @@ export interface ParsedService {
     shmSize?: string;
     dns?: string[];
     dnsSearch?: string[];
+    dnsOptions?: string[];
+    init?: boolean;
+    tty?: boolean;
+    stdinOpen?: boolean;
+    platform?: string;
+    ulimits?: string[];
 
     healthcheck?: {
         test: string[];
@@ -195,6 +254,8 @@ export interface ParsedStack {
     name: string;
     dir: string;
     networkName: string;
+    networks: ParsedNetwork[];
+    dnsDomain?: string;
     services: ParsedService[];
 
     dependsOn: Record<string, string[]>;
@@ -205,7 +266,7 @@ export interface ParsedStack {
 export interface IContainerStackEngine {
 
     systemStatus(): Promise<SystemStatus>;
-    ensureSystemStarted(): Promise<void>;
+    ensureSystemStarted(): Promise<boolean>;
 
     up(stack: ParsedStack, onProgress: ProgressSink): Promise<void>;
     down(stack: ParsedStack, opts: { removeNetwork?: boolean }, onProgress: ProgressSink): Promise<void>;

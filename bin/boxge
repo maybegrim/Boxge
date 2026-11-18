@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SOURCE="${BASH_SOURCE[0]}"
+while [ -L "$SOURCE" ]; do
+    DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+    SOURCE="$(readlink "$SOURCE")"
+    case "$SOURCE" in
+        /*) ;;
+        *) SOURCE="$DIR/$SOURCE" ;;
+    esac
+done
+ROOT="$(cd -P "$(dirname "$SOURCE")/.." && pwd)"
+
+NODE="$(command -v node || true)"
+if [ -z "$NODE" ]; then
+    for candidate in /opt/homebrew/bin/node /usr/local/bin/node; do
+        if [ -x "$candidate" ]; then
+            NODE="$candidate"
+            break
+        fi
+    done
+fi
+if [ -z "$NODE" ]; then
+    echo "boxge: node was not found. Install Node 22 or later." >&2
+    exit 127
+fi
+
+TSX="$ROOT/node_modules/tsx/dist/cli.mjs"
+if [ ! -f "$TSX" ]; then
+    echo "boxge: dependencies are missing. Run 'npm install' in $ROOT." >&2
+    exit 127
+fi
+
+exec "$NODE" "$TSX" --tsconfig "$ROOT/tsconfig.json" "$ROOT/extra/agent/cli.ts" "$@"

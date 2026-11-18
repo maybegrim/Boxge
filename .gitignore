@@ -36,3 +36,6 @@ yarn-error.log*
 /ProjectBrief.pdf
 /pickup.html
 KilnDB/
+
+# Menu bar app build output
+/extra/menubar/build/

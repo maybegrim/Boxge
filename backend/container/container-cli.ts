@@ -1,16 +1,29 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import semver from "semver";
 import { log } from "../log";
-import type { ProgressSink, RawSystemStatus } from "./types";
+import type { ProgressSink, RawContainer, RawSystemStatus } from "./types";
 
 export const CONTAINER_BIN = process.env.BOXGE_CONTAINER_BIN || "container";
 
-export const SUPPORTED_CONTAINER_VERSION = "1.0.0";
+export const MIN_CONTAINER_VERSION = "1.7.1";
 
 export const STACK_LABEL = "boxge.stack";
 
 export const NETWORK_PREFIX = "boxge-";
 
 export const ANON_VOLUME_LABEL = "com.apple.container.resource.anonymous";
+
+const READ_TIMEOUT_MS = 30_000;
+
+const SYSTEM_START_TIMEOUT_MS = 5 * 60_000;
+
+const LIST_TTL_MS = 1500;
+
+const VERSION_TTL_MS = 60_000;
+
+const KILL_GRACE_MS = 3000;
+
+const MUTATING_COMMANDS = new Set([ "run", "create", "start", "stop", "delete", "rm", "kill", "prune" ]);
 
 export interface RunResult {
     stdout: string;
@@ -19,36 +32,64 @@ export interface RunResult {
 }
 
 export interface RunOptions {
-
     cwd?: string;
-
     stream?: ProgressSink;
-
     throwOnError?: boolean;
-
     timeoutMs?: number;
+}
+
+export function summarizeOutput(text: string): string {
+    const lines = text
+        .replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "")
+        .split(/[\r\n]+/)
+        .map((line) => line.trim())
+        .filter((line) => line.length > 0);
+    const errors = lines.filter((line) => /^error\b/i.test(line));
+    if (errors.length > 0) {
+        return errors.join(" ");
+    }
+    return lines[lines.length - 1] ?? "";
+}
+
+let listCache: { at: number; promise: Promise<RawContainer[]> } | undefined;
+
+export function invalidateContainerList(): void {
+    listCache = undefined;
 }
 
 export function runContainerCmd(args: string[], opts: RunOptions = {}): Promise<RunResult> {
     return new Promise((resolve, reject) => {
         log.debug("container", `${CONTAINER_BIN} ${args.join(" ")}`);
 
+        const mutating = MUTATING_COMMANDS.has(args[0]);
+        if (mutating) {
+            invalidateContainerList();
+        }
+
         const child = spawn(CONTAINER_BIN, args, {
             cwd: opts.cwd,
             env: process.env,
+            stdio: [ "ignore", "pipe", "pipe" ],
         });
 
         let stdout = "";
         let stderr = "";
         let timedOut = false;
 
+        let killTimer: NodeJS.Timeout | undefined;
         const timer = opts.timeoutMs
             ? setTimeout(() => {
                 timedOut = true;
                 try {
-                    child.kill("SIGKILL");
+                    child.kill("SIGTERM");
                 } catch {
                 }
+                killTimer = setTimeout(() => {
+                    try {
+                        child.kill("SIGKILL");
+                    } catch {
+                    }
+                }, KILL_GRACE_MS);
             }, opts.timeoutMs)
             : undefined;
 
@@ -65,7 +106,6 @@ export function runContainerCmd(args: string[], opts: RunOptions = {}): Promise<
         });
 
         child.on("error", (err) => {
-
             if (timer) {
                 clearTimeout(timer);
             }
@@ -76,9 +116,16 @@ export function runContainerCmd(args: string[], opts: RunOptions = {}): Promise<
             if (timer) {
                 clearTimeout(timer);
             }
+            if (killTimer) {
+                clearTimeout(killTimer);
+            }
+            if (mutating) {
+                invalidateContainerList();
+            }
             const exitCode = timedOut ? -1 : (code ?? -1);
             if (opts.throwOnError && exitCode !== 0) {
-                reject(new Error(`container ${args.join(" ")} exited ${exitCode}: ${stderr.trim()}`));
+                const reason = timedOut ? `timed out after ${opts.timeoutMs}ms` : (summarizeOutput(stderr) || summarizeOutput(stdout));
+                reject(new Error(`container ${args.join(" ")} exited ${exitCode}: ${reason}`));
                 return;
             }
             resolve({ stdout,
@@ -120,10 +167,11 @@ export function registryLoginCmd(server: string, username: string, password: str
 export function spawnContainer(args: string[], opts: { cwd?: string; onData?: (chunk: string) => void } = {}): ChildProcess {
     log.debug("container", `(stream) ${CONTAINER_BIN} ${args.join(" ")}`);
     const child = spawn(CONTAINER_BIN, args, { cwd: opts.cwd,
-        env: process.env });
+        env: process.env,
+        stdio: [ "ignore", "pipe", "pipe" ] });
     if (opts.onData) {
-        child.stdout.on("data", (d: Buffer) => opts.onData!(d.toString()));
-        child.stderr.on("data", (d: Buffer) => opts.onData!(d.toString()));
+        child.stdout?.on("data", (d: Buffer) => opts.onData!(d.toString()));
+        child.stderr?.on("data", (d: Buffer) => opts.onData!(d.toString()));
     }
     return child;
 }
@@ -131,25 +179,53 @@ export function spawnContainer(args: string[], opts: { cwd?: string; onData?: (c
 export async function runContainerJson<T>(args: string[], opts: RunOptions = {}): Promise<T> {
     const emitsJsonByDefault = args.includes("inspect");
     const withFormat = (emitsJsonByDefault || args.includes("--format")) ? args : [ ...args, "--format", "json" ];
-    const { stdout, stderr, exitCode } = await runContainerCmd(withFormat, opts);
+    const { stdout, stderr, exitCode } = await runContainerCmd(withFormat, { timeoutMs: READ_TIMEOUT_MS,
+        ...opts });
     if (exitCode !== 0) {
-        throw new Error(`container ${args.join(" ")} failed (${exitCode}): ${stderr.trim()}`);
+        throw new Error(`container ${args.join(" ")} failed (${exitCode}): ${summarizeOutput(stderr)}`);
     }
     if (!stdout.trim()) {
-
         return ([] as unknown) as T;
     }
     return JSON.parse(stdout) as T;
 }
 
+export function listAllContainers(): Promise<RawContainer[]> {
+    const now = Date.now();
+    if (listCache && now - listCache.at < LIST_TTL_MS) {
+        return listCache.promise;
+    }
+    const promise = runContainerJson<RawContainer[]>([ "list", "--all" ]);
+    const entry = { at: now,
+        promise };
+    listCache = entry;
+    promise.catch(() => {
+        if (listCache === entry) {
+            listCache = undefined;
+        }
+    });
+    return promise;
+}
+
+let versionCache: { at: number; version: string } | undefined;
+
 export async function getContainerCliVersion(): Promise<string> {
-    const { stdout } = await runContainerCmd([ "--version" ]);
+    const now = Date.now();
+    if (versionCache && now - versionCache.at < VERSION_TTL_MS) {
+        return versionCache.version;
+    }
+    const { stdout } = await runContainerCmd([ "--version" ], { timeoutMs: READ_TIMEOUT_MS });
     const match = stdout.match(/version\s+(\d+\.\d+\.\d+)/i);
-    return match ? match[1] : stdout.trim();
+    const version = match ? match[1] : stdout.trim();
+    versionCache = { at: now,
+        version };
+    return version;
 }
 
 export async function ensureSystemStartedImpl(): Promise<void> {
-    const { stdout, stderr, exitCode } = await runContainerCmd([ "system", "start" ]);
+    const { stdout, stderr, exitCode } = await runContainerCmd(
+        [ "system", "start", "--enable-kernel-install" ],
+        { timeoutMs: SYSTEM_START_TIMEOUT_MS });
     const combined = stdout + stderr;
     if (combined.includes("No default kernel configured")) {
         throw new Error(
@@ -157,13 +233,15 @@ export async function ensureSystemStartedImpl(): Promise<void> {
             "`container system kernel set --recommended` once, then start Boxge again.");
     }
     if (exitCode !== 0) {
-        throw new Error(`container system start failed (${exitCode}): ${stderr.trim()}`);
+        throw new Error(`container system start failed (${exitCode}): ${summarizeOutput(stderr)}`);
     }
 }
 
 export async function readSystemStatus(): Promise<RawSystemStatus | null> {
     try {
-        return await runContainerJson<RawSystemStatus>([ "system", "status" ]);
+        const { stdout } = await runContainerCmd([ "system", "status", "--format", "json" ], { timeoutMs: READ_TIMEOUT_MS });
+        const parsed = JSON.parse(stdout) as RawSystemStatus;
+        return parsed && typeof parsed.status === "string" ? parsed : null;
     } catch (e) {
         if (e instanceof Error) {
             log.debug("container", "readSystemStatus failed: " + e.message);
@@ -172,7 +250,12 @@ export async function readSystemStatus(): Promise<RawSystemStatus | null> {
     }
 }
 
-let versionWarned = false;
+export function isSupportedVersion(version: string): boolean {
+    const parsed = semver.coerce(version);
+    return parsed !== null && semver.gte(parsed, MIN_CONTAINER_VERSION);
+}
+
+let warnedVersion: string | undefined;
 
 export async function validateContainerVersion(): Promise<{ version: string; supported: boolean }> {
     let version = "unknown";
@@ -187,13 +270,13 @@ export async function validateContainerVersion(): Promise<{ version: string; sup
             supported: false };
     }
 
-    const supported = version === SUPPORTED_CONTAINER_VERSION;
-    if (!supported && !versionWarned) {
-        versionWarned = true;
-        log.warn("container",
-            `⚠️  container CLI version ${version} differs from the pinned, tested version ` +
-            `${SUPPORTED_CONTAINER_VERSION}. Boxge may misbehave; all interaction is isolated in ` +
-            "backend/container/ so adjustments are localized. Proceeding anyway.");
+    const supported = isSupportedVersion(version);
+    if (!supported && warnedVersion !== version) {
+        warnedVersion = version;
+        log.error("container",
+            `container CLI version ${version} is older than ${MIN_CONTAINER_VERSION}, the minimum Boxge supports. ` +
+            "Install the latest release from https://github.com/apple/container/releases. " +
+            "Boxge will keep running, but CPU stats and newer features will not work.");
     }
     return { version,
         supported };

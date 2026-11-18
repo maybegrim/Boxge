@@ -1,7 +1,6 @@
 <template>
     <div>
         <form class="my-4" autocomplete="off" @submit.prevent="saveGeneral">
-            <!-- Client side Timezone -->
             <div v-if="false" class="mb-4">
                 <label for="timezone" class="form-label">
                     {{ $t("Display Timezone") }}
@@ -20,7 +19,6 @@
                 </select>
             </div>
 
-            <!-- Server Timezone -->
             <div v-if="false" class="mb-4">
                 <label for="timezone" class="form-label">
                     {{ $t("Server Timezone") }}
@@ -37,7 +35,6 @@
                 </select>
             </div>
 
-            <!-- Primary Hostname -->
             <div class="mb-4">
                 <label class="form-label" for="primaryBaseURL">
                     {{ $t("primaryHostname") }}
@@ -57,7 +54,33 @@
                 <div class="form-text"></div>
             </div>
 
-            <!-- Save Button -->
+            <div class="mb-4">
+                <label class="form-label" for="serviceDnsDomain">
+                    {{ $t("serviceDnsDomain") }}
+                </label>
+
+                <input
+                    id="serviceDnsDomain"
+                    v-model="settings.serviceDnsDomain"
+                    class="form-control"
+                    placeholder="boxge.test"
+                    autocapitalize="off"
+                    spellcheck="false"
+                />
+
+                <div class="form-text">
+                    {{ $t("serviceDnsDomainHelp") }}
+                </div>
+
+                <div v-if="dnsNeedsSetup" class="alert alert-warning mt-2 mb-0" role="alert">
+                    {{ $t("serviceDnsDomainSetup") }}
+                    <code class="d-block mt-1">sudo container system dns create {{ activeDnsDomain }}</code>
+                </div>
+                <div v-else-if="activeDnsDomain" class="form-text text-success">
+                    {{ $t("serviceDnsDomainReady", [ activeDnsDomain ]) }}
+                </div>
+            </div>
+
             <div>
                 <button class="btn btn-primary" type="submit">
                     {{ $t("Save") }}
@@ -95,16 +118,21 @@ export default {
         },
         guessTimezone() {
             return dayjs.tz.guess();
-        }
+        },
+        activeDnsDomain() {
+            return (this.$root.systemStatus || {}).serviceDnsDomain || "";
+        },
+        dnsNeedsSetup() {
+            const status = this.$root.systemStatus || {};
+            return !!status.serviceDnsDomain && !!status.runtimeRunning && !status.serviceDnsRegistered;
+        },
     },
 
     methods: {
-        /** Save the settings */
         saveGeneral() {
             localStorage.timezone = this.$root.userTimezone;
             this.saveSettings();
         },
-        /** Get the base URL of the application */
         autoGetPrimaryHostname() {
             this.settings.primaryHostname = location.hostname;
         },

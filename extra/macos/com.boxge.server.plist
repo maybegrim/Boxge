@@ -20,7 +20,7 @@
     <dict>
         <key>NODE_ENV</key><string>production</string>
         <key>BOXGE_PORT</key><string>5001</string>
-        <key>PATH</key><string>__NODE_DIR__:/usr/local/bin:/usr/bin:/bin</string>
+        <key>PATH</key><string>__NODE_DIR__:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
     </dict>
     <key>RunAtLoad</key><true/>
     <key>KeepAlive</key><true/>

@@ -1,14 +1,17 @@
 export * from "./types";
-export { ContainerStackEngine, containerEngine, NotImplementedError } from "./container-stack-engine";
-export { parseComposeStack } from "./compose-parser";
+export { ContainerStackEngine, containerEngine } from "./container-stack-engine";
+export { normalizeDnsDomain, parseComposeStack } from "./compose-parser";
 export { healthMonitor, type HealthState } from "./health-monitor";
-export { restartSupervisor, type RestartPolicy } from "./restart-supervisor";
+export { restartSupervisor } from "./restart-supervisor";
+export { buildBuildArgs, buildRunArgs, containerNameFor, serviceDnsName } from "./compose-translator";
 export {
     CONTAINER_BIN,
-    SUPPORTED_CONTAINER_VERSION,
+    MIN_CONTAINER_VERSION,
     STACK_LABEL,
     NETWORK_PREFIX,
+    listAllContainers,
     runContainerCmd,
+    summarizeOutput,
     runContainerJson,
     validateContainerVersion,
 } from "./container-cli";

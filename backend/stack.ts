@@ -2,6 +2,7 @@ import { DockgeServer } from "./dockge-server";
 import fs, { promises as fsAsync } from "fs";
 import { log } from "./log";
 import yaml from "yaml";
+import dotenv from "dotenv";
 import { detectPrimaryHostname, DockgeSocket, fileExists, ValidationError } from "./util-server";
 import path from "path";
 import {
@@ -26,11 +27,6 @@ import {
     type ProgressSink,
 } from "./container";
 
-/**
- * A Boxge stack: one directory containing a compose.yaml. File handling is identical to Dockge;
- * the difference is that every runtime operation now goes through the ContainerStackEngine
- * (Apple's `container` runtime) instead of `docker compose`.
- */
 export class Stack {
 
     name: string;
@@ -45,6 +41,31 @@ export class Stack {
 
     protected static managedStackList: Map<string, Stack> = new Map();
 
+    protected static lastErrors: Map<string, string> = new Map();
+
+    protected static lastOutputs: Map<string, string> = new Map();
+
+    protected static readonly OUTPUT_LIMIT = 256 * 1024;
+
+    static serviceDnsDomain = "";
+
+    protected static runtimeUnreachable = false;
+
+    protected static noteRuntimeStatus(error? : unknown) : void {
+        if (error === undefined) {
+            if (Stack.runtimeUnreachable) {
+                Stack.runtimeUnreachable = false;
+                log.info("stack", "The container runtime is answering again.");
+            }
+            return;
+        }
+        if (!Stack.runtimeUnreachable) {
+            Stack.runtimeUnreachable = true;
+            log.warn("stack", "Could not read runtime status; is the container runtime stopped? " +
+                (error instanceof Error ? error.message : String(error)));
+        }
+    }
+
     constructor(server : DockgeServer, name : string, composeYAML? : string, composeENV? : string, skipFSOperations = false) {
         this.name = name;
         this.server = server;
@@ -52,7 +73,6 @@ export class Stack {
         this._composeENV = composeENV;
 
         if (!skipFSOperations) {
-            // Check if compose file name is different from compose.yaml
             for (const filename of acceptedComposeFileNames) {
                 if (fs.existsSync(path.join(this.path, filename))) {
                     this._composeFileName = filename;
@@ -64,17 +84,14 @@ export class Stack {
 
     async toJSON(endpoint : string) : Promise<object> {
 
-        // Since we have multiple agents now, embed primary hostname in the stack object too.
         let primaryHostname = await Settings.get("primaryHostname");
         if (!primaryHostname) {
             if (!endpoint) {
                 primaryHostname = detectPrimaryHostname();
             } else {
-                // Use the endpoint as the primary hostname
                 try {
                     primaryHostname = (new URL("https://" + endpoint).hostname);
                 } catch (e) {
-                    // Just in case if the endpoint is in a incorrect format
                     primaryHostname = "localhost";
                 }
             }
@@ -90,13 +107,26 @@ export class Stack {
         };
     }
 
-    /** Unsupported/deferred compose keys for this stack, surfaced in the UI. Empty on parse error. */
     get warnings() : string[] {
         try {
-            return parseComposeStack(this.name, this.fullPath, this.composeYAML).warnings;
+            return parseComposeStack(this.name, this.fullPath, this.composeYAML, this.interpolationEnv(), { dnsDomain: Stack.serviceDnsDomain }).warnings;
         } catch (e) {
             return [];
         }
+    }
+
+    interpolationEnv() : Record<string, string | undefined> {
+        let globalEnv : Record<string, string> = {};
+        try {
+            globalEnv = dotenv.parse(fs.readFileSync(path.join(this.server.stacksDir, "global.env")));
+        } catch (e) {
+            globalEnv = {};
+        }
+        return {
+            ...process.env,
+            ...globalEnv,
+            ...dotenv.parse(this.composeENV),
+        };
     }
 
     toSimpleJSON(endpoint : string) : object {
@@ -110,46 +140,63 @@ export class Stack {
         };
     }
 
-    /**
-     * Parse this stack's compose.yaml into the engine's ParsedStack model.
-     * Throws ValidationError on malformed YAML so the socket layer surfaces it cleanly.
-     */
     parse() : ParsedStack {
         try {
-            return parseComposeStack(this.name, this.fullPath, this.composeYAML);
+            return parseComposeStack(this.name, this.fullPath, this.composeYAML, this.interpolationEnv(), { dnsDomain: Stack.serviceDnsDomain });
         } catch (e) {
             throw new ValidationError(e instanceof Error ? e.message : String(e));
         }
     }
 
-    /**
-     * Run a streamed lifecycle operation inside a fresh "compose" virtual terminal that the
-     * frontend attaches to. Streams progress, marks completion/failure, and rejects if another
-     * operation is already running for this stack.
-     */
-    protected async runWithComposeTerminal(socket : DockgeSocket, fn : (sink : ProgressSink) => Promise<void>) : Promise<number> {
-        const terminalName = getComposeTerminalName(socket.endpoint, this.name);
+    protected async runWithComposeTerminal(socket : DockgeSocket | undefined, fn : (sink : ProgressSink) => Promise<void>) : Promise<number> {
+        const terminalName = getComposeTerminalName(socket?.endpoint ?? "", this.name);
         if (Terminal.getTerminal(terminalName)) {
             throw new Error("Another operation is already running for this stack, please wait.");
         }
         const vt = new VirtualTerminal(this.server, terminalName, this.path);
         vt.rows = PROGRESS_TERMINAL_ROWS;
-        vt.join(socket);
+        if (socket) {
+            vt.join(socket);
+        }
         vt.start();
+        let output = "";
+        const record = (chunk : string) => {
+            output = (output + chunk).slice(-Stack.OUTPUT_LIMIT);
+            Stack.lastOutputs.set(this.name, output);
+            vt.writeOutput(chunk);
+        };
+        Stack.lastOutputs.set(this.name, "");
         try {
-            await fn((chunk) => vt.writeOutput(chunk));
+            await fn(record);
+            Stack.lastErrors.delete(this.name);
             vt.finish(0);
             return 0;
         } catch (e) {
-            vt.writeOutput(`\r\n\x1b[31m[boxge] Failed: ${e instanceof Error ? e.message : String(e)}\x1b[0m\r\n`);
+            const message = e instanceof Error ? e.message : String(e);
+            Stack.lastErrors.set(this.name, message);
+            record(`\r\n\x1b[31m[boxge] Failed: ${message}\x1b[0m\r\n`);
             vt.finish(1);
             throw e;
         }
     }
 
-    /**
-     * Per-service runtime status, reconstructed from the label-filtered container list.
-     */
+    static isBusy(stackName : string, endpoint = "") : boolean {
+        return Terminal.getTerminal(getComposeTerminalName(endpoint, stackName)) !== undefined;
+    }
+
+    static lastError(stackName : string) : string | undefined {
+        return Stack.lastErrors.get(stackName);
+    }
+
+    static lastOutput(stackName : string) : string {
+        return Stack.lastOutputs.get(stackName) ?? "";
+    }
+
+    static forget(stackName : string) : void {
+        Stack.lastErrors.delete(stackName);
+        Stack.lastOutputs.delete(stackName);
+    }
+
     async ps() : Promise<object> {
         return containerEngine.stackStatus(this.name);
     }
@@ -163,18 +210,14 @@ export class Stack {
     }
 
     validate() {
-        // Check name, allows [a-z][0-9] _ - only
         if (!this.name.match(/^[a-z0-9_-]+$/)) {
             throw new ValidationError("Stack name can only contain [a-z][0-9] _ - only");
         }
 
-        // Check YAML format
         yaml.parse(this.composeYAML);
 
         let lines = this.composeENV.split("\n");
 
-        // Check if the .env is valid
-        // It only happens when there is one line and it doesn't contain "="
         if (lines.length === 1 && !lines[0].includes("=") && lines[0].length > 0) {
             throw new ValidationError("Invalid .env format");
         }
@@ -209,7 +252,6 @@ export class Stack {
     get fullPath() : string {
         let dir = this.path;
 
-        // if dir is relative, make it absolute
         let fullPathDir;
         if (!path.isAbsolute(dir)) {
             fullPathDir = path.join(process.cwd(), dir);
@@ -219,22 +261,16 @@ export class Stack {
         return fullPathDir;
     }
 
-    /**
-     * Save the stack to the disk
-     * @param isAdd
-     */
     async save(isAdd : boolean) {
         this.validate();
 
         let dir = this.path;
 
-        // Check if the name is used if isAdd
         if (isAdd) {
             if (await fileExists(dir)) {
                 throw new ValidationError("Stack name already exists");
             }
 
-            // Create the stack folder
             await fsAsync.mkdir(dir);
         } else {
             if (!await fileExists(dir)) {
@@ -242,8 +278,12 @@ export class Stack {
             }
         }
 
-        // Write or overwrite the compose.yaml
         fs.writeFileSync(path.join(dir, this._composeFileName), this.composeYAML);
+
+        const envPath = path.join(dir, ".env");
+        if (await fileExists(envPath) || this.composeENV.trim() !== "") {
+            fs.writeFileSync(envPath, this.composeENV);
+        }
         if (process.env.PUID && process.env.PGID) {
             const uid = Number(process.env.PUID);
             const gid = Number(process.env.PGID);
@@ -252,23 +292,25 @@ export class Stack {
         }
     }
 
-    async deploy(socket : DockgeSocket) : Promise<number> {
+    async deploy(socket? : DockgeSocket) : Promise<number> {
         const parsed = this.parse();
         return this.runWithComposeTerminal(socket, (sink) => containerEngine.up(parsed, sink));
     }
 
-    async delete(socket: DockgeSocket) : Promise<number> {
-        // Tear down the runtime, then always remove the files. Even if teardown fails (e.g. the
-        // stack was never deployed), we still delete the directory so the file-based model is
-        // never "kidnapped".
+    async delete(socket?: DockgeSocket) : Promise<number> {
         try {
             const parsed = this.parse();
             await this.runWithComposeTerminal(socket, (sink) => containerEngine.down(parsed, { removeNetwork: true }, sink));
         } catch (e) {
-            log.warn("delete", "Teardown failed, removing files anyway: " + (e instanceof Error ? e.message : String(e)));
+            const message = e instanceof Error ? e.message : String(e);
+            const leftovers = await containerEngine.containersForStack(this.name).catch(() => []);
+            if (leftovers.length > 0) {
+                throw new Error(`Teardown failed, so the stack files were kept: ${message}`);
+            }
+            log.warn("delete", "Teardown reported a problem but no containers remain, removing files: " + message);
         }
+        Stack.forget(this.name);
 
-        // Remove the stack folder
         await fsAsync.rm(this.path, {
             recursive: true,
             force: true
@@ -288,17 +330,8 @@ export class Stack {
         }
     }
 
-    /**
-     * Checks if a compose file exists in the specified directory.
-     * @async
-     * @static
-     * @param {string} stacksDir - The directory of the stack.
-     * @param {string} filename - The name of the directory to check for the compose file.
-     * @returns {Promise<boolean>} A promise that resolves to a boolean indicating whether any compose file exists.
-     */
     static async composeFileExists(stacksDir : string, filename : string) : Promise<boolean> {
         let filenamePath = path.join(stacksDir, filename);
-        // Check if any compose file exists
         for (const filename of acceptedComposeFileNames) {
             let composeFile = path.join(filenamePath, filename);
             if (await fileExists(composeFile)) {
@@ -312,23 +345,19 @@ export class Stack {
         let stacksDir = server.stacksDir;
         let stackList : Map<string, Stack>;
 
-        // Use cached stack list?
         if (useCacheForManaged && this.managedStackList.size > 0) {
             stackList = this.managedStackList;
         } else {
             stackList = new Map<string, Stack>();
 
-            // Scan the stacks directory, and get the stack list
             let filenameList = await fsAsync.readdir(stacksDir);
 
             for (let filename of filenameList) {
                 try {
-                    // Check if it is a directory
                     let stat = await fsAsync.stat(path.join(stacksDir, filename));
                     if (!stat.isDirectory()) {
                         continue;
                     }
-                    // If no compose file exists, skip it
                     if (!await Stack.composeFileExists(stacksDir, filename)) {
                         continue;
                     }
@@ -342,13 +371,9 @@ export class Stack {
                 }
             }
 
-            // Cache by copying
             this.managedStackList = new Map(stackList);
         }
 
-        // Overlay live runtime status from the container runtime (grouped by the boxge.stack label).
-        // Replaces Dockge's `docker compose ls` — container has no compose-aggregate, so the engine
-        // reconstructs per-stack status from the flat container list.
         try {
             let runtimeStatus = await containerEngine.stackRuntimeStatusMap();
             for (let [ stackName, status ] of runtimeStatus) {
@@ -357,33 +382,25 @@ export class Stack {
                     stack._status = status;
                 }
             }
+            Stack.noteRuntimeStatus();
         } catch (e) {
-            if (e instanceof Error) {
-                log.warn("getStackList", "Could not read runtime status: " + e.message);
-            }
+            Stack.noteRuntimeStatus(e);
         }
 
         return stackList;
     }
 
-    /**
-     * Get the per-stack runtime status map, used to update stack statuses.
-     */
     static async getStatusList() : Promise<Map<string, number>> {
         try {
-            return await containerEngine.stackRuntimeStatusMap();
+            const statusMap = await containerEngine.stackRuntimeStatusMap();
+            Stack.noteRuntimeStatus();
+            return statusMap;
         } catch (e) {
-            if (e instanceof Error) {
-                log.warn("getStatusList", "Could not read runtime status: " + e.message);
-            }
+            Stack.noteRuntimeStatus(e);
             return new Map<string, number>();
         }
     }
 
-    /**
-     * On boot, re-register the health + restart supervisors for every stack that is currently
-     * running, so a Boxge restart doesn't drop restart policies or healthchecks on the floor.
-     */
     static async reconcileSupervisors(server : DockgeServer) : Promise<void> {
         let runtime : Map<string, number>;
         try {
@@ -396,8 +413,7 @@ export class Stack {
         for (const stackName of runtime.keys()) {
             try {
                 const stack = await Stack.getStack(server, stackName);
-                const parsed = parseComposeStack(stackName, stack.fullPath, stack.composeYAML);
-                containerEngine.registerSupervisors(parsed);
+                containerEngine.registerSupervisors(stack.parse());
                 log.info("reconcile", `Resumed supervisors for running stack '${stackName}'`);
             } catch (e) {
                 log.warn("reconcile", `Could not resume supervisors for '${stackName}': ${e instanceof Error ? e.message : String(e)}`);
@@ -410,11 +426,8 @@ export class Stack {
 
         if (!skipFSOperations) {
             if (!await fileExists(dir) || !(await fsAsync.stat(dir)).isDirectory()) {
-                // Really not found
                 throw new ValidationError("Stack not found");
             }
-        } else {
-            //log.debug("getStack", "Skip FS operations");
         }
 
         let stack : Stack;
@@ -430,29 +443,32 @@ export class Stack {
         return stack;
     }
 
-    async start(socket: DockgeSocket) {
+    async start(socket?: DockgeSocket) {
         const parsed = this.parse();
         return this.runWithComposeTerminal(socket, (sink) => containerEngine.up(parsed, sink));
     }
 
-    async stop(socket: DockgeSocket) : Promise<number> {
+    async stop(socket?: DockgeSocket) : Promise<number> {
         const parsed = this.parse();
         return this.runWithComposeTerminal(socket, (sink) => containerEngine.stopStack(parsed, sink));
     }
 
-    async restart(socket: DockgeSocket) : Promise<number> {
+    async restart(socket?: DockgeSocket) : Promise<number> {
         const parsed = this.parse();
         return this.runWithComposeTerminal(socket, (sink) => containerEngine.restart(parsed, sink));
     }
 
-    async down(socket: DockgeSocket) : Promise<number> {
+    async down(socket?: DockgeSocket) : Promise<number> {
         const parsed = this.parse();
         return this.runWithComposeTerminal(socket, (sink) => containerEngine.down(parsed, { removeNetwork: true }, sink));
     }
 
-    async update(socket: DockgeSocket) {
+    async clean(socket?: DockgeSocket) : Promise<number> {
+        return this.runWithComposeTerminal(socket, (sink) => containerEngine.cleanStack(this.name, sink));
+    }
+
+    async update(socket?: DockgeSocket) {
         const parsed = this.parse();
-        // pull updated images, then re-up to recreate containers on the new images.
         return this.runWithComposeTerminal(socket, async (sink) => {
             await containerEngine.pull(parsed, sink);
             await containerEngine.up(parsed, sink);
@@ -464,17 +480,15 @@ export class Stack {
         let terminal = Terminal.getTerminal(terminalName);
 
         if (terminal instanceof VirtualTerminal) {
-            // Already streaming — just attach this client and replay the scrollback.
             terminal.join(socket);
             return;
         }
 
-        // Stream live logs (`container logs -f` per service) into one combined virtual terminal.
         const vt = new VirtualTerminal(this.server, terminalName, this.path);
         vt.rows = COMBINED_TERMINAL_ROWS;
         vt.cols = COMBINED_TERMINAL_COLS;
         vt.join(socket);
-        vt.start(true); // auto-close (and stop the log streams) once every client has left
+        vt.start(true);
 
         const handle = await containerEngine.streamStackLogs(this.name, (data) => vt.writeOutput(data));
         vt.onFinish(() => handle.stop());
@@ -489,7 +503,6 @@ export class Stack {
     }
 
     async joinContainerTerminal(socket: DockgeSocket, serviceName: string, shell : string = "sh", index: number = 0) {
-        // Web terminal: `container exec -it <stack>-<service> <shell>` as an interactive pty.
         const terminalName = getContainerExecTerminalName(socket.endpoint, this.name, serviceName, index);
         let terminal = Terminal.getTerminal(terminalName);
 
@@ -516,8 +529,6 @@ export class Stack {
                 statusList.get(svc.service)?.push({
                     status: svc.health || svc.state,
                     name: svc.containerName,
-                    // The per-container IP is the real reachability address on the container runtime
-                    // (host port publishing does not forward to localhost). Surfaced in the UI.
                     ip: svc.ipv4,
                 });
             }
@@ -528,15 +539,15 @@ export class Stack {
         }
     }
 
-    async startService(socket: DockgeSocket, serviceName: string) {
+    async startService(socket: DockgeSocket | undefined, serviceName: string) {
         return this.runWithComposeTerminal(socket, (sink) => containerEngine.startService(this.name, serviceName, sink));
     }
 
-    async stopService(socket: DockgeSocket, serviceName: string): Promise<number> {
+    async stopService(socket: DockgeSocket | undefined, serviceName: string): Promise<number> {
         return this.runWithComposeTerminal(socket, (sink) => containerEngine.stopService(this.name, serviceName, sink));
     }
 
-    async restartService(socket: DockgeSocket, serviceName: string): Promise<number> {
+    async restartService(socket: DockgeSocket | undefined, serviceName: string): Promise<number> {
         return this.runWithComposeTerminal(socket, (sink) => containerEngine.restartService(this.name, serviceName, sink));
     }
 }

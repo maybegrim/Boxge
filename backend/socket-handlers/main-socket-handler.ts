@@ -18,17 +18,13 @@ import {
 import { passwordStrength } from "check-password-strength";
 import jwt from "jsonwebtoken";
 import { Settings } from "../settings";
+import { normalizeDnsDomain } from "../container";
 import fs, { promises as fsAsync } from "fs";
 import path from "path";
 
 export class MainSocketHandler extends SocketHandler {
     create(socket : DockgeSocket, server : DockgeServer) {
 
-        // ***************************
-        // Public Socket API
-        // ***************************
-
-        // Setup
         socket.on("setup", async (username, password, callback) => {
             try {
                 if (passwordStrength(password).value === "Too weak") {
@@ -62,7 +58,6 @@ export class MainSocketHandler extends SocketHandler {
             }
         });
 
-        // Login by token
         socket.on("loginByToken", async (token, callback) => {
             const clientIP = await server.getClientIP(socket);
 
@@ -78,7 +73,6 @@ export class MainSocketHandler extends SocketHandler {
                 ]) as User;
 
                 if (user) {
-                    // Check if the password changed
                     if (decoded.h !== shake256(user.password, SHAKE256_LENGTH)) {
                         throw new Error("The token is invalid due to password change or old token");
                     }
@@ -120,13 +114,11 @@ export class MainSocketHandler extends SocketHandler {
 
         });
 
-        // Login
         socket.on("login", async (data, callback) => {
             const clientIP = await server.getClientIP(socket);
 
             log.info("auth", `Login by username + password. IP=${clientIP}`);
 
-            // Checking
             if (typeof callback !== "function") {
                 return;
             }
@@ -135,7 +127,6 @@ export class MainSocketHandler extends SocketHandler {
                 return;
             }
 
-            // Login Rate Limit
             if (!await loginRateLimiter.pass(callback)) {
                 log.info("auth", `Too many failed requests for user ${data.username}. IP=${clientIP}`);
                 return;
@@ -165,7 +156,6 @@ export class MainSocketHandler extends SocketHandler {
 
         });
 
-        // Change Password
         socket.on("changePassword", async (password, callback) => {
             try {
                 checkLogin(socket);
@@ -228,16 +218,10 @@ export class MainSocketHandler extends SocketHandler {
             try {
                 checkLogin(socket);
 
-                // If currently is disabled auth, don't need to check
-                // Disabled Auth + Want to Disable Auth => No Check
-                // Disabled Auth + Want to Enable Auth => No Check
-                // Enabled Auth + Want to Disable Auth => Check!!
-                // Enabled Auth + Want to Enable Auth => No Check
                 const currentDisabledAuth = await Settings.get("disableAuth");
                 if (!currentDisabledAuth && data.disableAuth) {
                     await doubleCheckPassword(socket, currentPassword);
                 }
-                // Handle global.env
                 if (data.globalENV && data.globalENV != "# VARIABLE=value #comment") {
                     await fsAsync.writeFile(path.join(server.stacksDir, "global.env"), data.globalENV);
                 } else {
@@ -248,7 +232,13 @@ export class MainSocketHandler extends SocketHandler {
                 }
                 delete data.globalENV;
 
+                if (data.serviceDnsDomain !== undefined) {
+                    data.serviceDnsDomain = normalizeDnsDomain(data.serviceDnsDomain);
+                }
+
                 await Settings.setSettings("general", data);
+                await server.reloadServiceDns();
+                void server.sendSystemStatus();
 
                 callback({
                     ok: true,
@@ -267,7 +257,6 @@ export class MainSocketHandler extends SocketHandler {
             }
         });
 
-        // Disconnect all other socket clients of the user
         socket.on("disconnectOtherSocketClients", async () => {
             try {
                 checkLogin(socket);
@@ -279,7 +268,6 @@ export class MainSocketHandler extends SocketHandler {
             }
         });
 
-        // composerize
         socket.on("composerize", async (dockerRunCommand : unknown, callback) => {
             try {
                 checkLogin(socket);
@@ -288,10 +276,8 @@ export class MainSocketHandler extends SocketHandler {
                     throw new ValidationError("dockerRunCommand must be a string");
                 }
 
-                // Option: 'latest' | 'v2x' | 'v3x'
                 let composeTemplate = composerize(dockerRunCommand, "", "latest");
 
-                // Remove the first line "name: <your project name>"
                 composeTemplate = composeTemplate.split("\n").slice(1).join("\n");
 
                 callback({
@@ -314,7 +300,6 @@ export class MainSocketHandler extends SocketHandler {
         ]) as User;
 
         if (user && verifyPassword(password, user.password)) {
-            // Upgrade the hash to bcrypt
             if (needRehashPassword(user.password)) {
                 await R.exec("UPDATE `user` SET password = ? WHERE id = ? ", [
                     generatePasswordHash(password),
